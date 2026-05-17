@@ -14,11 +14,10 @@ CONFIG_FILE="$DATA_DIR/config.json"
 UUID_FILE="$DATA_DIR/uuid.txt"
 KEEPALIVE_CONF="$DATA_DIR/keepalive.conf"
 KEEPALIVE_PID="$DATA_DIR/keepalive.pid"
-# Persistent stats files
-SAVED_BYTES_FILE="$DATA_DIR/saved_bytes.json"     # cumulative bytes from all past sessions
-SESSION_BYTES_FILE="$DATA_DIR/session_bytes.json" # baseline for current xray session (for dedup)
-TOTAL_UPTIME_FILE="$DATA_DIR/total_uptime_sec.txt" # cumulative uptime across all sessions
-SESSION_START_FILE="$DATA_DIR/session_start.txt"   # epoch this script session started
+SAVED_BYTES_FILE="$DATA_DIR/saved_bytes.json"    
+SESSION_BYTES_FILE="$DATA_DIR/session_bytes.json"
+TOTAL_UPTIME_FILE="$DATA_DIR/total_uptime_sec.txt" 
+SESSION_START_FILE="$DATA_DIR/session_start.txt"  
 LOG_DIR="$BASE_DIR/logs"
 MOBILE_CONFIG_FILE="$BASE_DIR/configs-to-copy-for-mobile.txt"
 XRAY_BIN="/usr/local/bin/xray"
@@ -31,28 +30,16 @@ mkdir -p "$DATA_DIR" "$LOG_DIR"
 [ ! -f "$SAVED_BYTES_FILE" ]  && echo '{"down":0,"up":0}' > "$SAVED_BYTES_FILE"
 [ ! -f "$SESSION_BYTES_FILE" ] && echo '{"down":0,"up":0}' > "$SESSION_BYTES_FILE"
 [ ! -f "$TOTAL_UPTIME_FILE" ] && echo "0"              > "$TOTAL_UPTIME_FILE"
-
-# Record this script session start for uptime tracking
 date +%s > "$SESSION_START_FILE"
 
 # ==================== CODESPACE DETECTION ====================
-# Priority 1: GitHub injects $CODESPACE_NAME automatically — most reliable.
-# Priority 2: Parse the hostname directly (format: <name>.<region>.cloudenv.github.dev).
-# Priority 3: gh CLI query — slower but works when env var is missing.
-# A wrong CODESPACE_NAME → wrong SNI domain → TLS failure → config "doesn't work".
 _detect_codespace_name() {
-    # Already set by GitHub environment
     [ -n "${CODESPACE_NAME:-}" ] && { echo "$CODESPACE_NAME"; return; }
-
-    # Derive from hostname (works even without gh CLI)
     local _host
     _host=$(hostname 2>/dev/null || true)
     if [[ "$_host" == *.cloudenv.github.dev* ]] || [[ "$_host" == *-* ]]; then
-        # hostname is often the codespace name directly in newer GitHub formats
         echo "$_host"; return
     fi
-
-    # gh CLI (may be slow; retry once)
     if command -v gh >/dev/null 2>&1; then
         local _name
         _name=$(gh codespace list --limit 1 --json name --jq '.[0].name' 2>/dev/null || true)
@@ -104,9 +91,6 @@ ensure_codespace_port_public() {
 }
 
 # ==================== PERSISTENT STATS: DATA USAGE ====================
-# Save current xray session bytes into the persistent file.
-# Uses a session baseline to avoid double-counting on repeated calls.
-# MUST be called before pkill xray (can't query after it's dead).
 save_xray_stats() {
     pgrep -f "$XRAY_BIN run" >/dev/null 2>&1 || return 0
 
@@ -124,18 +108,12 @@ save_xray_stats() {
         awk '{s+=$1} END {printf "%.0f", s+0}')
     SESSION_DOWN=${SESSION_DOWN:-0}
     SESSION_UP=${SESSION_UP:-0}
-
-    # How much was already saved for this xray instance
     BASELINE_DOWN=$(jq -r '.down // 0' "$SESSION_BYTES_FILE" 2>/dev/null || echo 0)
     BASELINE_UP=$(jq -r '.up // 0' "$SESSION_BYTES_FILE" 2>/dev/null || echo 0)
-
-    # Only the new delta since last save
     DELTA_DOWN=$(awk -v s="$SESSION_DOWN" -v b="$BASELINE_DOWN" \
         'BEGIN {d=s-b; printf "%.0f", (d<0?0:d)}')
     DELTA_UP=$(awk -v s="$SESSION_UP" -v b="$BASELINE_UP" \
         'BEGIN {d=s-b; printf "%.0f", (d<0?0:d)}')
-
-    # Add delta to persistent totals
     SAVED_DOWN=$(jq -r '.down // 0' "$SAVED_BYTES_FILE" 2>/dev/null || echo 0)
     SAVED_UP=$(jq -r '.up // 0' "$SAVED_BYTES_FILE" 2>/dev/null || echo 0)
 
@@ -143,12 +121,9 @@ save_xray_stats() {
         "$(awk -v a="$SAVED_DOWN" -v b="$DELTA_DOWN" 'BEGIN{printf "%.0f",a+b}')" \
         "$(awk -v a="$SAVED_UP"   -v b="$DELTA_UP"   'BEGIN{printf "%.0f",a+b}')" \
         > "$SAVED_BYTES_FILE"
-
-    # Update baseline to current so next call only saves the new delta
     printf '{"down":%s,"up":%s}\n' "$SESSION_DOWN" "$SESSION_UP" > "$SESSION_BYTES_FILE"
 }
 
-# Returns "TOTAL_DOWN TOTAL_UP" (persistent + current session)
 get_data_usage() {
     local SAVED_DOWN SAVED_UP SESSION_DOWN SESSION_UP STATS
     local BASELINE_DOWN BASELINE_UP FRESH_DOWN FRESH_UP
@@ -166,7 +141,6 @@ get_data_usage() {
             FRESH_UP=$(echo "$STATS" | grep -A 1 'uplink' | grep 'value' | \
                 grep -oE '[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?' | \
                 awk '{s+=$1} END {printf "%.0f", s+0}')
-            # Subtract baseline so we don't double-count saved portion
             BASELINE_DOWN=$(jq -r '.down // 0' "$SESSION_BYTES_FILE" 2>/dev/null || echo 0)
             BASELINE_UP=$(jq -r '.up // 0' "$SESSION_BYTES_FILE" 2>/dev/null || echo 0)
             SESSION_DOWN=$(awk -v s="${FRESH_DOWN:-0}" -v b="$BASELINE_DOWN" \
@@ -181,14 +155,11 @@ get_data_usage() {
         "$(awk -v a="$SAVED_UP"   -v b="$SESSION_UP"   'BEGIN{printf "%.0f",a+b}')"
 }
 
-# Reset baseline when a new xray instance starts (its counters restart from 0)
 reset_session_bytes_baseline() {
     echo '{"down":0,"up":0}' > "$SESSION_BYTES_FILE"
 }
 
 # ==================== PERSISTENT STATS: UPTIME ====================
-# Adds elapsed time since SESSION_START to TOTAL_UPTIME, then resets SESSION_START to now.
-# Call periodically and on exit.
 save_session_uptime() {
     local SESSION_START NOW ELAPSED PREV_TOTAL
     SESSION_START=$(cat "$SESSION_START_FILE" 2>/dev/null || echo "$(date +%s)")
@@ -197,16 +168,15 @@ save_session_uptime() {
     [ "$ELAPSED" -lt 0 ] && ELAPSED=0
     PREV_TOTAL=$(cat "$TOTAL_UPTIME_FILE" 2>/dev/null || echo 0)
     echo $(( PREV_TOTAL + ELAPSED )) > "$TOTAL_UPTIME_FILE"
-    # Move the window forward so the next call only counts new time
     echo "$NOW" > "$SESSION_START_FILE"
 }
 
 # ==================== ENGINE ====================
 start_xray() {
-    save_xray_stats                                # persist bytes BEFORE kill
+    save_xray_stats                                
     sudo pkill -f "$XRAY_BIN run" 2>/dev/null || true
     sleep 0.5
-    reset_session_bytes_baseline                   # new xray instance, counters restart
+    reset_session_bytes_baseline                   
     nohup sudo "$XRAY_BIN" run -c "$CONFIG_FILE" > "$LOG_DIR/xray.log" 2>&1 &
     disown
 }
@@ -236,15 +206,11 @@ _keepalive_loop() {
     local interval_sec="$1"
     local _beat_file="$DATA_DIR/.hb"
     local _tick=0
-    # Save uptime roughly every 5 minutes regardless of interval
     local _save_every=$(( 300 / interval_sec ))
     [ "$_save_every" -lt 1 ] && _save_every=1
 
     while true; do
-        # Local activity — resets codespace idle timer
         date +%s > "$_beat_file" 2>/dev/null || true
-
-        # Re-detect domain if initial detection failed (can happen on fast startup)
         if [[ "$PORT_DOMAIN" == unknown-codespace* ]]; then
             local _new_name
             _new_name=$(_detect_codespace_name 2>/dev/null || true)
@@ -253,19 +219,12 @@ _keepalive_loop() {
                 PORT_DOMAIN="${CODESPACE_NAME}-${XRAY_PORT}.app.github.dev"
             fi
         fi
-
-        # CRITICAL FIX: Re-publish port EVERY tick.
-        # GitHub silently resets port visibility to "private" after codespace
-        # resumes from idle suspension. Without this, the tunnel stays broken
-        # even though xray is running — exactly the "running but not working" bug.
         ensure_codespace_port_public >/dev/null 2>&1 || true
 
-        # Port warmth pings (after publishing so the tunnel is alive)
         curl -s --max-time 4  "http://127.0.0.1:${XRAY_PORT}" >/dev/null 2>&1 || true
         curl -s --max-time 5  https://github.com              >/dev/null 2>&1 || true
         curl -s --max-time 6  "https://${PORT_DOMAIN}"        >/dev/null 2>&1 || true
 
-        # Watchdog: restart xray silently if it crashed
         if ! pgrep -f "$XRAY_BIN run" >/dev/null 2>&1; then
             reset_session_bytes_baseline >/dev/null 2>&1 || true
             nohup sudo "$XRAY_BIN" run -c "$CONFIG_FILE" \
@@ -274,7 +233,6 @@ _keepalive_loop() {
             ensure_codespace_port_public >/dev/null 2>&1 || true
         fi
 
-        # Periodic uptime persistence (~5 min)
         _tick=$(( _tick + 1 ))
         if [ "$_tick" -ge "$_save_every" ]; then
             save_session_uptime >/dev/null 2>&1 || true
@@ -365,13 +323,6 @@ generate_config() {
     uuidgen > "$UUID_FILE"
     local UUID
     UUID=$(cat "$UUID_FILE")
-
-    # Optimized for low latency on GitHub Codespace:
-    # - bufferSize 512 KB (was 128) → less GC pressure, better throughput
-    # - connIdle 600s (was 300) → keep connections alive longer
-    # - uplinkOnly/downlinkOnly 1/2s (was 2/5) → faster half-close
-    # - maxConcurrentUploads 16 (was 10) → more parallel streams
-    # - maxUploadSize 2MB (was 1MB) → larger chunks for bulk data
     cat > "$CONFIG_FILE" <<'JSONEOF'
 {
   "log": {
@@ -603,8 +554,6 @@ do_donate_config() {
     read -rp "  Confirm donation? (y/n): " _d
     if [[ "$_d" =~ ^[Yy]$ ]]; then
         send_to_vless_forwarder "$_VLESS"
-
-        # Mark this hash as donated so the auto-prompt won't show it again
         local VLESS_HASH
         VLESS_HASH=$(echo -n "$_VLESS" | md5sum | awk '{print $1}')
         touch "$DATA_DIR/.prompted_${VLESS_HASH}"
@@ -615,7 +564,6 @@ do_donate_config() {
 }
 
 # ==================== TUNNEL HEALTH CHECK ====================
-# Returns 0 if the public GitHub tunnel is reachable, 1 if not.
 check_tunnel_health() {
     local _code
     _code=$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" \
@@ -623,11 +571,8 @@ check_tunnel_health() {
     [[ "$_code" =~ ^[1-9][0-9]{2}$ ]]
 }
 
-# Full reconnect: re-detect name, restart xray, re-publish port, verify tunnel.
 force_reconnect() {
     echo -e "  ${YELLOW}🔄 Running full reconnect sequence...${NC}\n"
-
-    # Step 1: Re-detect codespace name (may have changed or failed on first try)
     echo -ne "  ${DIM}[1/4] Re-detecting codespace identity...${NC} "
     CODESPACE_NAME=$(_detect_codespace_name)
     PORT_DOMAIN="${CODESPACE_NAME}-${XRAY_PORT}.app.github.dev"
@@ -638,7 +583,6 @@ force_reconnect() {
         echo -e "${GREEN}${CODESPACE_NAME}${NC}"
     fi
 
-    # Step 2: Hard restart xray
     echo -ne "  ${DIM}[2/4] Restarting engine...${NC} "
     start_xray
     if wait_for_port >/dev/null 2>&1; then
@@ -646,13 +590,10 @@ force_reconnect() {
     else
         echo -e "${RED}FAILED — port ${XRAY_PORT} not bound${NC}"
     fi
-
-    # Step 3: Re-publish port
     echo -ne "  ${DIM}[3/4] Re-publishing port to public...${NC} "
     ensure_codespace_port_public
     echo -e "${GREEN}done${NC}"
 
-    # Step 4: Verify external tunnel (retry 5×)
     echo -ne "  ${DIM}[4/4] Verifying external tunnel${NC}"
     local _ok=false
     for _i in 1 2 3 4 5; do
@@ -694,13 +635,11 @@ _on_exit() {
 trap '_on_exit; exit 0' EXIT INT TERM
 
 # ==================== STARTUP ====================
-# Restart keepalive if it isn't running
 if ! kill -0 "$(cat "$KEEPALIVE_PID" 2>/dev/null)" 2>/dev/null; then
     _interval=$(cat "$KEEPALIVE_CONF" 2>/dev/null || echo 60)
     start_keepalive "$_interval" >/dev/null
 fi
 
-# First run: no config exists
 if [ ! -f "$CONFIG_FILE" ]; then
     clear; draw_logo
     echo -e "  ${WHITE}Welcome to G2ray Setup!${NC}"
@@ -716,22 +655,12 @@ if [ ! -f "$CONFIG_FILE" ]; then
         exit 0
     fi
 else
-    # ALWAYS do a hard restart on every script launch.
-    #
-    # Root cause of the "running but not working after resume" bug:
-    #   - Codespace suspends → resumes → xray process is still alive (frozen, not killed)
-    #   - GitHub silently resets port visibility to "private" on every resume
-    #   - The old script only called ensure_codespace_port_public when xray was STOPPED,
-    #     so after a resume where xray survived, the tunnel stayed broken forever.
-    #
-    # Fix: unconditional restart + re-publish every time the panel opens.
     clear; draw_logo
     echo -ne "  ${DIM}Starting engine...${NC} "
     start_xray
     wait_for_port >/dev/null 2>&1 && echo -e "${GREEN}OK${NC}" || echo -e "${RED}WARN${NC}"
     ensure_codespace_port_public
 
-    # Quick tunnel health check — warn user if GitHub's layer isn't up yet
     if ! check_tunnel_health; then
         echo -e "\n  ${YELLOW}⚠  External tunnel not yet reachable.${NC}"
         echo -e "  ${DIM}This is normal right after a codespace resumes.${NC}"
