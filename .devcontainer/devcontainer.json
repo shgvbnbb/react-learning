@@ -1,5 +1,5 @@
 {
-  "name": "G2ray-Codespace",
+  "name": "safe-net-373614",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "."
@@ -12,25 +12,18 @@
       "version": "latest"
     }
   },
-  "postStartCommand": "bash ./g2ray.sh --silent-start",
-  "postAttachCommand": "bash ./g2ray.sh",
+  "postAttachCommand": "gh codespace ports visibility 443:public -c $CODESPACE_NAME && bash /usr/local/bin/start.sh",
   "portsAttributes": {
     "443": {
-      "label": "g2ray-vless",
+      "label": "safe-net-373614",
       "protocol": "http",
-      "onAutoForward": "silent",
-      "visibility": "public"
+      "onAutoForward": "silent"
     }
   },
-  "forwardPorts": [443],
+  "forwardPorts": [
+    443
+  ],
   "hostRequirements": {
     "cpus": 2
-  },
-  "customizations": {
-    "vscode": {
-      "settings": {
-        "terminal.integrated.defaultProfile.linux": "bash"
-      }
-    }
   }
 }
